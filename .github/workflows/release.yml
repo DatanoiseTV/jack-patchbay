@@ -28,6 +28,7 @@ jobs:
       - name: Install cross-compilation toolchain
         run: |
           sudo dpkg --add-architecture ${{ matrix.pkg_arch }}
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list || true
           sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list || true
           case "${{ matrix.pkg_arch }}" in
             arm64)
