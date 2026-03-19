@@ -171,6 +171,25 @@ static int on_xrun(void *arg) {
 
 static int jack_get_xruns() { return g_meter.xrun_count; }
 
+// Port/connection change flags — polled by Go to trigger immediate state updates
+static volatile int port_changed = 0;
+static volatile int conn_changed = 0;
+
+static void on_port_register(jack_port_id_t port, int registered, void *arg) {
+    port_changed = 1;
+}
+
+static void on_port_connect(jack_port_id_t a, jack_port_id_t b, int connected, void *arg) {
+    conn_changed = 1;
+}
+
+static int jack_check_changes() {
+    int changed = port_changed | conn_changed;
+    port_changed = 0;
+    conn_changed = 0;
+    return changed;
+}
+
 static void on_jack_shutdown(void *arg) {
     meter_state_t *m = (meter_state_t *)arg;
     m->active = 0; m->client = NULL; m->port_count = 0;
@@ -187,7 +206,11 @@ static int jack_init() {
     jack_on_shutdown(g_meter.client, on_jack_shutdown, &g_meter);
     jack_set_process_callback(g_meter.client, process_callback, &g_meter);
     jack_set_xrun_callback(g_meter.client, on_xrun, &g_meter);
+    jack_set_port_registration_callback(g_meter.client, on_port_register, &g_meter);
+    jack_set_port_connect_callback(g_meter.client, on_port_connect, &g_meter);
     g_meter.xrun_count = 0;
+    port_changed = 0;
+    conn_changed = 0;
     if (jack_activate(g_meter.client)) return -2;
     g_meter.active = 1;
     return 0;
@@ -436,9 +459,22 @@ func jackConnectLoop() {
 
 func statePollLoop(interval time.Duration) {
 	var lastJSON []byte
-	for {
-		time.Sleep(interval)
+	// Check for JACK-notified changes at high rate, full poll at low rate
+	checkInterval := 50 * time.Millisecond
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+	pollCounter := 0
+	pollEvery := int(interval / checkInterval)
+	if pollEvery < 1 { pollEvery = 1 }
+
+	for range ticker.C {
 		if C.jack_is_active() == 0 { continue }
+
+		// Only do full state read on timer OR when JACK notifies a change
+		pollCounter++
+		jackChanged := C.jack_check_changes() != 0
+		if pollCounter < pollEvery && !jackChanged { continue }
+		pollCounter = 0
 		st := readState()
 		data, _ := json.Marshal(st)
 		stateMu.Lock()
