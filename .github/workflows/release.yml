@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            pkg_arch: amd64
+          - arch: arm64
+            pkg_arch: arm64
+          - arch: arm
+            pkg_arch: armhf
+            goarm: "7"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo dpkg --add-architecture ${{ matrix.pkg_arch }}
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list || true
+          case "${{ matrix.pkg_arch }}" in
+            arm64)
+              echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs) main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
+              echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+              ;;
+            armhf)
+              echo "deb [arch=armhf] http://ports.ubuntu.com/ $(lsb_release -cs) main universe" | sudo tee /etc/apt/sources.list.d/armhf.list
+              echo "deb [arch=armhf] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+              ;;
+          esac
+          sudo apt-get update
+          case "${{ matrix.arch }}" in
+            amd64) sudo apt-get install -y libjack-jackd2-dev ;;
+            arm64) sudo apt-get install -y gcc-aarch64-linux-gnu libjack-jackd2-dev:arm64 ;;
+            arm)   sudo apt-get install -y gcc-arm-linux-gnueabihf libjack-jackd2-dev:armhf ;;
+          esac
+
+      - name: Build
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          case "${{ matrix.arch }}" in
+            amd64) export CC=gcc ;;
+            arm64) export CC=aarch64-linux-gnu-gcc; export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig ;;
+            arm)   export CC=arm-linux-gnueabihf-gcc; export PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig ;;
+          esac
+          go build -o jack-patchbay-linux-${{ matrix.arch }} -ldflags="-s -w" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jack-patchbay-linux-${{ matrix.arch }}
+          path: jack-patchbay-linux-${{ matrix.arch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          for dir in artifacts/jack-patchbay-linux-*; do
+            name=$(basename "$dir")
+            cp "$dir/$name" "release/$name"
+            chmod +x "release/$name"
+          done
+
+      - name: Generate checksums
+        run: cd release && sha256sum * > SHA256SUMS
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
