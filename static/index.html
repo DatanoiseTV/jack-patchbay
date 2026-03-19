@@ -70,6 +70,7 @@ table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius
 .pb.sv{background:var(--teal);color:#000;border-color:var(--teal)}
 .pb.dl{background:transparent;color:var(--danger);border-color:transparent;padding:2px 4px;font-size:9px}
 .pin{background:var(--bg-deep);border:1px solid var(--border-strong);color:var(--text-primary);padding:2px 6px;border-radius:4px;font-size:10px;font-family:inherit;width:100px}
+.psel{background:var(--bg-deep);border:1px solid var(--border-strong);color:var(--text-primary);padding:2px 6px;border-radius:4px;font-size:10px;font-family:inherit;min-width:80px;cursor:pointer}
 
 .tbtn{background:none;border:1px solid var(--border-strong);border-radius:4px;width:28px;height:22px;cursor:pointer;font-size:14px;line-height:1;padding:0;margin-left:6px;color:var(--text-secondary)}
 .tbtn:hover{border-color:var(--accent)}
@@ -113,9 +114,14 @@ const stat=(ok,t)=>{$('dot').className='dot'+(ok?'':' err');$('st').textContent=
 function ldPre(){try{presets=JSON.parse(localStorage.getItem('jack-presets')||'{}')}catch(e){presets={}}}
 function svPre(){localStorage.setItem('jack-presets',JSON.stringify(presets))}
 function renderPre(){
-  ldPre();let h='<label>Presets</label>';
-  for(const n in presets){h+='<button class="pb'+(n===aPre?' act':'')+'" onclick="recPre(\''+esc(n)+'\')">'+esc(n)+'</button><button class="pb dl" onclick="delPre(\''+esc(n)+'\')">&times;</button>';}
-  h+='<input class="pin" id="pn" placeholder="Name..." onkeydown="if(event.key===\'Enter\')savPre()"><button class="pb sv" onclick="savPre()">Save</button>';
+  ldPre();
+  const names=Object.keys(presets);
+  let h='<label>Presets</label>';
+  h+='<select class="psel" id="psel" onchange="if(this.value)recPre(this.value)"><option value="">-- select --</option>';
+  for(const n of names)h+='<option value="'+esc(n)+'"'+(n===aPre?' selected':'')+'>'+esc(n)+'</option>';
+  h+='</select>';
+  if(names.length)h+='<button class="pb dl" onclick="delPre($(&quot;psel&quot;).value)" title="Delete selected">&times;</button>';
+  h+='<input class="pin" id="pn" placeholder="Save as..." onkeydown="if(event.key===\'Enter\')savPre()"><button class="pb sv" onclick="savPre()">Save</button>';
   return h;
 }
 function savPre(){const n=($('pn')||{}).value?.trim();if(!n||!S)return toast('Name?','bad');presets[n]={c:(S.connections||[]).slice()};aPre=n;svPre();buildAll();toast('Saved')}
@@ -179,6 +185,8 @@ function initWS(){
 // --- rAF render loop (decoupled from data) ---
 function renderLoop(){
   if(meterDirty){meterDirty=false;updMeters()}
+  // Update RTT display
+  const ji=$('ji');if(ji&&S?.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+'f / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / rtt '+uiLatency+'ms';
   requestAnimationFrame(renderLoop);
 }
 

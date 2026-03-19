@@ -240,7 +240,13 @@ func main() {
 	mux.HandleFunc("/api/meters", apiMetersWS)
 	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 	mux.Handle("/", http.FileServer(http.FS(sub)))
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	// Wrap with headers for high-resolution timers (cross-origin isolation)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+		mux.ServeHTTP(w, r)
+	})
+	log.Fatal(http.ListenAndServe(*addr, handler))
 }
 
 func jackConnectLoop() {
