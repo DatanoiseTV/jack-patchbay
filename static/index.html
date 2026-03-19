@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JACK Patchbay - AES67</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛</text></svg>">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+:root{--bg-deep:#06080c;--bg-base:#0a0d13;--bg-surface:#0e1118;--bg-raised:#131720;--bg-hover:#181d28;--text-primary:#e8ecf2;--text-secondary:#8694a8;--text-tertiary:#4a5568;--border:rgba(255,255,255,0.06);--border-strong:rgba(255,255,255,0.10);--accent:#4a90e2;--accent-glow:rgba(74,144,226,0.15);--teal:#00d4aa;--route-glow:rgba(0,212,170,0.35);--danger:#e85555;--amber:#f59e0b;--r:6px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg-deep);color:var(--text-secondary);height:100vh;overflow:hidden}
+header{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--bg-base);border-bottom:1px solid var(--border)}
+header h1{font-size:14px;font-weight:600;color:var(--text-primary)}
+header h1 b{color:var(--accent)}
+.hdr-info{display:flex;align-items:center;gap:10px;font-size:10px;font-family:'JetBrains Mono',monospace}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--teal)}
+.dot.err{background:var(--danger)}
+.layout{display:flex;height:calc(100vh - 38px)}
+.panel{background:var(--bg-base);width:290px;min-width:200px;overflow-y:auto;flex-shrink:0}
+.panel-l{border-right:1px solid var(--border)}
+.panel-r{border-left:1px solid var(--border)}
+.ph{padding:8px 12px 4px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-tertiary)}
+.gl{padding:4px 12px 2px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--accent)}
+.pi{display:flex;align-items:center;gap:4px;padding:2px 12px;font-size:10px;height:22px}
+.pi .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pi .db{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-tertiary);min-width:38px;text-align:right}
+.pi .lat{font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-tertiary);min-width:28px;text-align:right}
+.pi-r{flex-direction:row-reverse}
+.pi-r .db,.pi-r .lat{text-align:left}
+.pi-r .nm{text-align:right}
+
+/* VU meter */
+.vu{position:relative;width:100px;height:6px;background:var(--bg-deep);border-radius:3px;overflow:hidden;flex-shrink:0}
+.vu-rms{position:absolute;top:0;left:0;height:100%;border-radius:3px;background:var(--accent);opacity:0.6}
+.vu-peak{position:absolute;top:0;left:0;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--teal) 0%,var(--teal) 65%,var(--amber) 82%,var(--danger) 96%)}
+.vu-hold{position:absolute;top:0;bottom:0;width:2px;background:var(--text-primary);border-radius:1px}
+
+.matrix-wrap{flex:1;overflow:auto;padding:8px}
+table{border-collapse:separate;border-spacing:1px}
+table th{background:var(--bg-surface);padding:0;font-weight:500;font-size:9px;position:sticky;z-index:2}
+table thead th{top:0;z-index:3}
+table th.co{left:0;top:0;z-index:4;width:16px}
+table th.rh{left:0}
+.ch-l{writing-mode:vertical-lr;transform:rotate(180deg);padding:5px 3px;min-height:70px;white-space:nowrap;color:var(--text-tertiary)}
+.ch-l .cl{color:var(--accent)}
+.rh-l{padding:3px 6px;white-space:nowrap;text-align:right;color:var(--text-tertiary)}
+.rh-l .cl{color:var(--accent)}
+table td{width:24px;height:24px;min-width:24px;text-align:center;vertical-align:middle;background:var(--bg-surface);cursor:pointer;transition:background .08s;position:relative}
+table td:hover{background:var(--bg-hover)}
+table td.on{background:var(--route-glow)}
+table td.on::after{content:'';display:block;width:8px;height:8px;border-radius:50%;background:var(--teal);margin:auto;box-shadow:0 0 4px rgba(0,212,170,0.4);transition:box-shadow .1s}
+table td.on.sig::after{box-shadow:0 0 10px rgba(0,212,170,0.8),0 0 20px rgba(0,212,170,0.3)}
+table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin:auto;animation:pulse .3s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.gs-c{border-left:2px solid rgba(74,144,226,.12)!important}
+.gs-r{border-top:2px solid rgba(74,144,226,.12)!important}
+.empty{display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-tertiary);font-size:13px}
+.toast{position:fixed;bottom:12px;left:50%;transform:translateX(-50%) translateY(8px);background:var(--bg-surface);border:1px solid var(--border-strong);padding:6px 16px;border-radius:var(--r);font-size:11px;z-index:99;opacity:0;transition:all .2s;pointer-events:none}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.ok{border-color:var(--teal)}.toast.bad{border-color:var(--danger)}
+
+/* Presets */
+.presets{display:flex;align-items:center;gap:4px;padding:5px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap;flex-shrink:0}
+.presets label{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text-tertiary)}
+.pb{background:var(--bg-raised);color:var(--text-secondary);border:1px solid var(--border);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px;font-family:inherit}
+.pb:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pb.act{border-color:var(--accent);color:var(--accent)}
+.pb.sv{background:var(--teal);color:#000;border-color:var(--teal)}
+.pb.dl{background:transparent;color:var(--danger);border-color:transparent;padding:2px 4px;font-size:9px}
+.pin{background:var(--bg-deep);border:1px solid var(--border-strong);color:var(--text-primary);padding:2px 6px;border-radius:4px;font-size:10px;font-family:inherit;width:100px}
+
+@media(max-width:900px){.layout{flex-direction:column}.panel{width:100%;min-width:0;max-height:28vh;border:none;border-bottom:1px solid var(--border)}.panel-r{border-top:1px solid var(--border);border-left:none}.vu{width:60px}}
+@media(max-width:600px){.pi .lat{display:none}.vu{width:50px}}
+</style>
+</head>
+<body>
+<header>
+  <h1><b>JACK</b> Patchbay</h1>
+  <div class="hdr-info"><div class="dot" id="dot"></div><span id="st">...</span><span id="ji" style="color:var(--text-tertiary)"></span></div>
+</header>
+<div class="layout">
+  <div class="panel panel-l" id="srcP"></div>
+  <div class="matrix-wrap" id="wrap"><div class="empty">Waiting for JACK...</div></div>
+  <div class="panel panel-r" id="dstP"></div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+let S=null,pending=new Set(),sse=null,ws=null,skey='',presets={},aPre='';
+
+// Meter data (updated from WS, read by rAF)
+let meterDirty=false;
+const M={peak:null,rms:null,hold:null,holdDecay:null,ts:0};
+
+const toast=(m,t='ok')=>{const e=$('toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',2e3)};
+const stat=(ok,t)=>{$('dot').className='dot'+(ok?'':' err');$('st').textContent=t};
+
+// --- Presets ---
+function ldPre(){try{presets=JSON.parse(localStorage.getItem('jack-presets')||'{}')}catch(e){presets={}}}
+function svPre(){localStorage.setItem('jack-presets',JSON.stringify(presets))}
+function renderPre(){
+  ldPre();let h='<label>Presets</label>';
+  for(const n in presets){h+='<button class="pb'+(n===aPre?' act':'')+'" onclick="recPre(\''+esc(n)+'\')">'+esc(n)+'</button><button class="pb dl" onclick="delPre(\''+esc(n)+'\')">&times;</button>';}
+  h+='<input class="pin" id="pn" placeholder="Name..." onkeydown="if(event.key===\'Enter\')savPre()"><button class="pb sv" onclick="savPre()">Save</button>';
+  return h;
+}
+function savPre(){const n=($('pn')||{}).value?.trim();if(!n||!S)return toast('Name?','bad');presets[n]={c:(S.connections||[]).slice()};aPre=n;svPre();buildAll();toast('Saved')}
+async function recPre(n){const p=presets[n];if(!p||!S)return;for(const c of(S.connections||[]))await fetch('/api/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)}).catch(()=>{});for(const c of p.c)await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)}).catch(()=>{});aPre=n;buildAll();toast('Recalled "'+n+'"')}
+function delPre(n){delete presets[n];if(aPre===n)aPre='';svPre();buildAll()}
+
+// --- SSE (state) ---
+function initSSE(){
+  if(sse){sse.close();sse=null}
+  const es=new EventSource('/api/events');
+  es.onmessage=e=>{try{
+    S=JSON.parse(e.data);if(!S?.ports)S={ports:[],connections:[],clients:[]};if(!S.connections)S.connections=[];
+    const nc=S.connections.length;stat(true,S.ports.length+' ports | '+nc+' conn');
+    const ji=$('ji');if(ji&&S.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+'f / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms';
+    const nk=sk();if(nk!==skey){skey=nk;buildAll()}else updMatrix();
+  }catch(x){console.error(x)}};
+  es.onerror=()=>{stat(false,'Disconnected');es.close();sse=null;setTimeout(initSSE,3e3)};
+  sse=es;
+}
+
+// --- WebSocket (meters) with reconnect backoff ---
+let wsBackoff=500;
+function initWS(){
+  if(ws){try{ws.close()}catch(e){};ws=null}
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  const w=new WebSocket(proto+'//'+location.host+'/api/meters');
+  w.binaryType='arraybuffer';
+  w.onopen=()=>{wsBackoff=500};
+  w.onmessage=e=>{
+    if(!S?.ports)return;
+    const view=new DataView(e.data);
+    if(view.byteLength<6)return;
+    const type=view.getUint8(0);
+    if(type!==0x01)return;
+    const n=view.getUint8(1);
+    M.ts=view.getUint32(2,true);
+
+    if(!M.peak||M.peak.length!==n){
+      M.peak=new Float32Array(n);M.rms=new Float32Array(n);
+      M.hold=new Float32Array(n);M.holdDecay=new Uint8Array(n);
+      M.peak.fill(-96);M.rms.fill(-96);M.hold.fill(-96);
+    }
+
+    let off=6;
+    for(let i=0;i<n;i++){M.peak[i]=view.getInt16(off,true)/100;off+=2}
+    for(let i=0;i<n;i++){M.rms[i]=view.getInt16(off,true)/100;off+=2}
+
+    // Peak hold with decay
+    for(let i=0;i<n;i++){
+      if(M.peak[i]>M.hold[i]){M.hold[i]=M.peak[i];M.holdDecay[i]=30}// hold for ~1s at 30fps
+      else if(M.holdDecay[i]>0)M.holdDecay[i]--;
+      else M.hold[i]=Math.max(M.hold[i]-1.5,-96);// decay 1.5dB/frame
+    }
+    meterDirty=true;
+  };
+  w.onclose=()=>{ws=null;setTimeout(initWS,wsBackoff);wsBackoff=Math.min(wsBackoff*2,5000)};
+  w.onerror=()=>{try{w.close()}catch(e){}};
+  ws=w;
+}
+
+// --- rAF render loop (decoupled from data) ---
+function renderLoop(){
+  if(meterDirty){meterDirty=false;updMeters()}
+  requestAnimationFrame(renderLoop);
+}
+
+function isC(a,b){return S?.connections?.some(c=>c.source===a&&c.dest===b)}
+async function tog(a,b){const k=a+'|'+b;if(pending.has(k))return;pending.add(k);updMatrix();const ep=isC(a,b)?'/api/disconnect':'/api/connect';try{const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source:a,dest:b})});if(!r.ok)toast(await r.text(),'bad')}catch(e){toast(e.message,'bad')}pending.delete(k)}
+function sk(){if(!S)return'';return S.ports.map(p=>p.name+p.isOut+p.connections).join()+S.connections.map(c=>c.source+c.dest).join()}
+
+// dB to meter percentage (map -60..0 dB to 0..100%)
+function dbPct(db){return Math.max(0,Math.min(100,(db+60)/60*100))}
+function dbStr(db){return db<=-90?'-\u221E':db.toFixed(0)}
+
+// --- Build UI ---
+function buildAll(){
+  if(!S?.ports?.length){$('wrap').innerHTML='<div class="empty">Waiting for JACK...</div>';$('srcP').innerHTML='';$('dstP').innerHTML='';return}
+  buildPanels();buildMatrix();
+}
+function buildPanels(){
+  const outs=S.ports.filter(p=>p.isOut),ins=S.ports.filter(p=>!p.isOut);
+  let sh='<div class="ph">Sources</div><div class="presets">'+renderPre()+'</div>';
+  let lc='';
+  for(const p of outs){
+    if(p.client!==lc){sh+='<div class="gl">'+esc(p.client)+'</div>';lc=p.client}
+    const i=S.ports.indexOf(p);
+    sh+='<div class="pi"><span class="nm">'+esc(p.port)+'</span>'
+      +'<div class="vu"><div class="vu-rms" id="vr'+i+'"></div><div class="vu-peak" id="vp'+i+'"></div><div class="vu-hold" id="vh'+i+'"></div></div>'
+      +'<span class="db" id="db'+i+'">-\u221E</span>'
+      +'<span class="lat">'+p.latencyMs+'ms</span></div>';
+  }
+  $('srcP').innerHTML=sh;
+  let dh='<div class="ph">Destinations</div>';
+  lc='';
+  for(const p of ins){
+    if(p.client!==lc){dh+='<div class="gl">'+esc(p.client)+'</div>';lc=p.client}
+    const i=S.ports.indexOf(p);
+    dh+='<div class="pi pi-r"><span class="nm">'+esc(p.port)+'</span>'
+      +'<div class="vu"><div class="vu-rms" id="vr'+i+'"></div><div class="vu-peak" id="vp'+i+'"></div><div class="vu-hold" id="vh'+i+'"></div></div>'
+      +'<span class="db" id="db'+i+'">-\u221E</span>'
+      +'<span class="lat">'+p.latencyMs+'ms</span></div>';
+  }
+  $('dstP').innerHTML=dh;
+}
+function buildMatrix(){
+  const outs=S.ports.filter(p=>p.isOut),ins=S.ports.filter(p=>!p.isOut);
+  if(!outs.length||!ins.length){$('wrap').innerHTML='<div class="empty">Need sources + destinations</div>';return}
+  let h='<table><thead><tr><th class="co"></th>';
+  let lc='';
+  for(const p of ins){const s=p.client!==lc?' gs-c':'';h+='<th class="'+s+'"><div class="ch-l">'+(p.client!==lc?'<span class="cl">'+esc(p.client)+'</span><br>':'')+esc(p.port)+'</div></th>';lc=p.client}
+  h+='</tr></thead><tbody>';
+  let lr='';
+  for(const o of outs){
+    const rs=o.client!==lr?' gs-r':'';
+    h+='<tr><th class="rh'+rs+'"><div class="rh-l">'+(o.client!==lr?'<span class="cl">'+esc(o.client)+'</span> ':'')+esc(o.port)+'</div></th>';
+    let li='';
+    for(const d of ins){
+      const cs=d.client!==li?' gs-c':'';const cn=isC(o.name,d.name),pn=pending.has(o.name+'|'+d.name);
+      let cl=cs+rs;if(pn)cl+=' pend';else if(cn)cl+=' on';
+      h+='<td class="'+cl+'" id="c-'+css(o.name)+'-'+css(d.name)+'" onclick="tog(\''+ea(o.name)+'\',\''+ea(d.name)+'\')" title="'+esc(o.name)+' \u2192 '+esc(d.name)+'"></td>';
+      li=d.client;
+    }
+    h+='</tr>';lr=o.client;
+  }
+  h+='</tbody></table>';$('wrap').innerHTML=h;
+}
+function updMatrix(){
+  if(!S)return;const outs=S.ports.filter(p=>p.isOut),ins=S.ports.filter(p=>!p.isOut);
+  for(const o of outs)for(const d of ins){
+    const el=$('c-'+css(o.name)+'-'+css(d.name));if(!el)continue;
+    const cn=isC(o.name,d.name),pn=pending.has(o.name+'|'+d.name);
+    el.classList.toggle('on',cn&&!pn);el.classList.toggle('pend',pn);
+    // Signal glow on active connections
+    if(cn&&M.peak){const si=S.ports.indexOf(o);el.classList.toggle('sig',si>=0&&M.peak[si]>-40)}
+  }
+}
+function updMeters(){
+  if(!M.peak||!S)return;
+  for(let i=0;i<S.ports.length&&i<M.peak.length;i++){
+    const vp=$('vp'+i),vr=$('vr'+i),vh=$('vh'+i),db=$('db'+i);
+    const ppct=dbPct(M.peak[i]),rpct=dbPct(M.rms[i]),hpct=dbPct(M.hold[i]);
+    if(vp)vp.style.width=ppct+'%';
+    if(vr)vr.style.width=rpct+'%';
+    if(vh){if(hpct>1){vh.style.left=Math.min(hpct,99)+'%';vh.style.display=''}else vh.style.display='none'}
+    if(db)db.textContent=dbStr(M.peak[i]);
+  }
+}
+
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function ea(s){return s.replace(/'/g,"\\'")}
+function css(s){return s.replace(/[^a-zA-Z0-9_-]/g,'_')}
+
+initSSE();initWS();requestAnimationFrame(renderLoop);
+</script>
+</body>
+</html>
