@@ -176,13 +176,23 @@ func streamAudioToWebRTC(track *webrtc.TrackLocalStaticSample, cancel chan struc
 	}
 	enc.SetBitrate(monBitrate)
 
-	const frameSamples = 960 // 20ms @ 48kHz
+	const (
+		frameSamples = 960     // 20ms @ 48kHz per Opus frame
+		ringSize     = 16384   // must match C MON_RING_SIZE
+		targetBuffer = 960 * 3 // 60ms target buffer level
+		maxBuffer    = 960 * 8 // 160ms max before skip-ahead
+	)
+
 	pcmBuf := make([]int16, frameSamples*channels)
 	opusBuf := make([]byte, 4000)
 	outL := make([]float32, 4096)
 	outR := make([]float32, 4096)
 
-	readPos := cMonGetWritePos()
+	// Start reading from a position that gives us ~60ms of pre-buffered audio
+	writePos := cMonGetWritePos()
+	readPos := (writePos - targetBuffer + ringSize) & (ringSize - 1)
+	primed := false
+
 	frameDuration := 20 * time.Millisecond
 	ticker := time.NewTicker(frameDuration)
 	defer ticker.Stop()
@@ -198,25 +208,52 @@ func streamAudioToWebRTC(track *webrtc.TrackLocalStaticSample, cancel chan struc
 			continue
 		}
 
-		n := cMonRead(readPos, outL, outR, frameSamples)
-		if n < frameSamples {
-			for i := n; i < frameSamples; i++ {
-				outL[i] = 0
-				outR[i] = 0
+		// Calculate how much audio is available in the ring buffer
+		writePos = cMonGetWritePos()
+		avail := (writePos - readPos + ringSize) & (ringSize - 1)
+
+		// Pre-buffer: wait until we have enough before starting
+		if !primed {
+			if avail < targetBuffer {
+				continue
 			}
-			if n > 0 {
-				readPos = (readPos + n) & (16384 - 1)
-			}
-		} else {
-			readPos = (readPos + frameSamples) & (16384 - 1)
+			primed = true
+			log.Printf("WebRTC monitor: primed with %d samples (%.1fms)", avail, float64(avail)/48.0)
 		}
 
-		for i := 0; i < frameSamples; i++ {
-			if channels == 2 {
-				pcmBuf[i*2] = floatToI16(float64(outL[i]))
-				pcmBuf[i*2+1] = floatToI16(float64(outR[i]))
-			} else {
-				pcmBuf[i] = floatToI16(float64(outL[i]))
+		// If buffer grew too large (clock drift), skip ahead to target level
+		if avail > maxBuffer {
+			skip := avail - targetBuffer
+			readPos = (readPos + skip) & (ringSize - 1)
+			avail = targetBuffer
+		}
+
+		// If not enough for a full frame, send silence (underrun)
+		if avail < frameSamples {
+			for i := range pcmBuf {
+				pcmBuf[i] = 0
+			}
+		} else {
+			// Read one Opus frame worth of audio
+			n := cMonRead(readPos, outL, outR, frameSamples)
+			readPos = (readPos + frameSamples) & (ringSize - 1)
+
+			for i := 0; i < frameSamples; i++ {
+				if i < n {
+					if channels == 2 {
+						pcmBuf[i*2] = floatToI16(float64(outL[i]))
+						pcmBuf[i*2+1] = floatToI16(float64(outR[i]))
+					} else {
+						pcmBuf[i] = floatToI16(float64(outL[i]))
+					}
+				} else {
+					if channels == 2 {
+						pcmBuf[i*2] = 0
+						pcmBuf[i*2+1] = 0
+					} else {
+						pcmBuf[i] = 0
+					}
+				}
 			}
 		}
 
