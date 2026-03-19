@@ -78,6 +78,9 @@ typedef struct {
     int   mon_write;       // write position (both channels advance together)
     int   mon_ch[2];       // port indices being monitored (-1 = none)
     int   mon_active;      // 1 = monitoring enabled
+
+    // Xrun counter
+    int xrun_count;
 } meter_state_t;
 
 static meter_state_t g_meter;
@@ -160,6 +163,14 @@ static int process_callback(jack_nframes_t nframes, void *arg) {
     return 0;
 }
 
+static int on_xrun(void *arg) {
+    meter_state_t *m = (meter_state_t *)arg;
+    m->xrun_count++;
+    return 0;
+}
+
+static int jack_get_xruns() { return g_meter.xrun_count; }
+
 static void on_jack_shutdown(void *arg) {
     meter_state_t *m = (meter_state_t *)arg;
     m->active = 0; m->client = NULL; m->port_count = 0;
@@ -175,6 +186,8 @@ static int jack_init() {
     if (!g_meter.client) return -1;
     jack_on_shutdown(g_meter.client, on_jack_shutdown, &g_meter);
     jack_set_process_callback(g_meter.client, process_callback, &g_meter);
+    jack_set_xrun_callback(g_meter.client, on_xrun, &g_meter);
+    g_meter.xrun_count = 0;
     if (jack_activate(g_meter.client)) return -2;
     g_meter.active = 1;
     return 0;
@@ -342,7 +355,10 @@ type Port struct {
 	Connections int     `json:"connections"`
 	LatencyMs   float64 `json:"latencyMs"`
 }
-type Connection struct{ Source, Dest string }
+type Connection struct {
+	Source string `json:"source"`
+	Dest   string `json:"dest"`
+}
 type State struct {
 	Ports       []Port       `json:"ports"`
 	Connections []Connection `json:"connections"`
@@ -350,6 +366,7 @@ type State struct {
 	SampleRate  int          `json:"sampleRate"`
 	BufferSize  int          `json:"bufferSize"`
 	FFTBins     int          `json:"fftBins"`
+	Xruns       int          `json:"xruns"`
 }
 
 var (
@@ -597,6 +614,7 @@ func readState() *State {
 	sort.Strings(st.Clients)
 	st.SampleRate = int(C.meter_get_sample_rate())
 	st.BufferSize = int(C.meter_get_buffer_size())
+	st.Xruns = int(C.jack_get_xruns())
 	return st
 }
 
