@@ -7,7 +7,8 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛</text></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
 <style>
-:root{--bg-deep:#06080c;--bg-base:#0a0d13;--bg-surface:#0e1118;--bg-raised:#131720;--bg-hover:#181d28;--text-primary:#e8ecf2;--text-secondary:#8694a8;--text-tertiary:#4a5568;--border:rgba(255,255,255,0.06);--border-strong:rgba(255,255,255,0.10);--accent:#4a90e2;--accent-glow:rgba(74,144,226,0.15);--teal:#00d4aa;--route-glow:rgba(0,212,170,0.35);--danger:#e85555;--amber:#f59e0b;--r:6px}
+:root,html[data-theme="dark"]{--bg-deep:#06080c;--bg-base:#0a0d13;--bg-surface:#0e1118;--bg-raised:#131720;--bg-hover:#181d28;--text-primary:#e8ecf2;--text-secondary:#8694a8;--text-tertiary:#4a5568;--border:rgba(255,255,255,0.06);--border-strong:rgba(255,255,255,0.10);--accent:#4a90e2;--accent-glow:rgba(74,144,226,0.15);--teal:#00d4aa;--route-glow:rgba(0,212,170,0.35);--danger:#e85555;--amber:#f59e0b;--r:6px}
+html[data-theme="light"]{--bg-deep:#f0f2f5;--bg-base:#ffffff;--bg-surface:#f7f8fa;--bg-raised:#ebedf0;--bg-hover:#e2e4e8;--text-primary:#1a1d27;--text-secondary:#4a5060;--text-tertiary:#8690a0;--border:rgba(0,0,0,0.08);--border-strong:rgba(0,0,0,0.14);--accent:#2b6cb0;--accent-glow:rgba(43,108,176,0.12);--teal:#0a9178;--route-glow:rgba(10,145,120,0.2);--danger:#c53030;--amber:#c05621;--r:6px}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg-deep);color:var(--text-secondary);height:100vh;overflow:hidden}
 header{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:var(--bg-base);border-bottom:1px solid var(--border)}
@@ -70,6 +71,11 @@ table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius
 .pb.dl{background:transparent;color:var(--danger);border-color:transparent;padding:2px 4px;font-size:9px}
 .pin{background:var(--bg-deep);border:1px solid var(--border-strong);color:var(--text-primary);padding:2px 6px;border-radius:4px;font-size:10px;font-family:inherit;width:100px}
 
+.tbtn{background:none;border:1px solid var(--border-strong);border-radius:4px;width:28px;height:22px;cursor:pointer;font-size:14px;line-height:1;padding:0;margin-left:6px;color:var(--text-secondary)}
+.tbtn:hover{border-color:var(--accent)}
+html[data-theme="light"] .vu-rms{background:var(--accent);opacity:0.3}
+html[data-theme="light"] .vu-peak{background:linear-gradient(90deg,var(--teal) 0%,var(--teal) 65%,var(--amber) 82%,var(--danger) 96%)}
+html[data-theme="light"] .vu{background:#d8dbe0}
 @media(max-width:900px){.layout{flex-direction:column}.panel{width:100%;min-width:0;max-height:28vh;border:none;border-bottom:1px solid var(--border)}.panel-r{border-top:1px solid var(--border);border-left:none}.vu{width:60px}}
 @media(max-width:600px){.pi .lat{display:none}.vu{width:50px}}
 </style>
@@ -77,7 +83,7 @@ table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius
 <body>
 <header>
   <h1><b>JACK</b> Patchbay</h1>
-  <div class="hdr-info"><div class="dot" id="dot"></div><span id="st">...</span><span id="ji" style="color:var(--text-tertiary)"></span></div>
+  <div class="hdr-info"><div class="dot" id="dot"></div><span id="st">...</span><span id="ji" style="color:var(--text-tertiary)"></span><button class="tbtn" id="themeBtn" onclick="toggleTheme()" title="Toggle light/dark"></button></div>
 </header>
 <div class="layout">
   <div class="panel panel-l" id="srcP"></div>
@@ -87,6 +93,13 @@ table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius
 <div class="toast" id="toast"></div>
 <script>
 const $=id=>document.getElementById(id);
+
+// Theme
+function getTheme(){return localStorage.getItem('jack-patchbay-theme')||(window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark')}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);const b=$('themeBtn');if(b)b.textContent=t==='dark'?'\u2600':'\u263E'}
+function toggleTheme(){const t=getTheme()==='dark'?'light':'dark';localStorage.setItem('jack-patchbay-theme',t);applyTheme(t)}
+applyTheme(getTheme());
+
 let S=null,pending=new Set(),sse=null,ws=null,skey='',presets={},aPre='';
 
 // Meter data (updated from WS, read by rAF)
