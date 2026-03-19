@@ -72,6 +72,12 @@ table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius
 .pin{background:var(--bg-deep);border:1px solid var(--border-strong);color:var(--text-primary);padding:2px 6px;border-radius:4px;font-size:10px;font-family:inherit;width:100px}
 .psel{background:var(--bg-deep);border:1px solid var(--border-strong);color:var(--text-primary);padding:2px 6px;border-radius:4px;font-size:10px;font-family:inherit;min-width:80px;cursor:pointer}
 
+/* Eye/FFT button */
+.eye{background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;opacity:0.4;transition:opacity .15s;color:var(--text-secondary)}
+.eye:hover,.eye.on{opacity:1;color:var(--accent)}
+.fft-wrap{padding:2px 12px 6px;overflow:hidden;transition:max-height .2s}
+.fft-canvas{width:100%;height:48px;border-radius:3px;background:var(--bg-deep);display:block}
+
 .tbtn{background:none;border:1px solid var(--border-strong);border-radius:4px;width:28px;height:22px;cursor:pointer;font-size:14px;line-height:1;padding:0;margin-left:6px;color:var(--text-secondary)}
 .tbtn:hover{border-color:var(--accent)}
 html[data-theme="light"] .vu-rms{background:var(--accent);opacity:0.3}
@@ -102,9 +108,11 @@ function toggleTheme(){const t=getTheme()==='dark'?'light':'dark';localStorage.s
 applyTheme(getTheme());
 
 let S=null,pending=new Set(),sse=null,ws=null,skey='',presets={},aPre='';
+const fftOpen={};  // port index -> true if FFT panel is open
+const fftData={};  // port index -> Float32Array of dB values
 
 // Meter data (updated from WS, read by rAF)
-let meterDirty=false,uiLatency=0;
+let meterDirty=false,fftDirty=false,uiLatency=0;
 const M={peak:null,rms:null,hold:null,holdDecay:null,ts:0};
 
 const toast=(m,t='ok')=>{const e=$('toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',2e3)};
@@ -153,8 +161,20 @@ function initWS(){
     if(!S?.ports)return;
     const view=new DataView(e.data);
     if(view.byteLength<6)return;
-    const type=view.getUint8(0);
-    if(type!==0x01)return;
+    const mtype=view.getUint8(0);
+
+    // FFT data (type 0x02)
+    if(mtype===0x02&&view.byteLength>=8){
+      const portIdx=view.getUint8(1);
+      const binCount=view.getUint16(2,true);
+      if(!fftData[portIdx])fftData[portIdx]=new Float32Array(binCount);
+      let o=8;
+      for(let i=0;i<binCount&&o+2<=view.byteLength;i++){fftData[portIdx][i]=view.getInt16(o,true)/100;o+=2}
+      fftDirty=true;
+      return;
+    }
+
+    if(mtype!==0x01)return;
     const n=view.getUint8(1);
     M.ts=view.getUint32(2,true);
 
@@ -184,9 +204,67 @@ function initWS(){
 // --- rAF render loop (decoupled from data) ---
 function renderLoop(){
   if(meterDirty){meterDirty=false;updMeters()}
-  // Update RTT display
+  if(fftDirty){fftDirty=false;drawAllFFT()}
   const ji=$('ji');if(ji&&S?.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+' samples / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / ui rtt '+uiLatency+'ms';
   requestAnimationFrame(renderLoop);
+}
+
+// --- FFT / Spectrum Analyzer ---
+function toggleFFT(portIdx){
+  if(fftOpen[portIdx]){
+    delete fftOpen[portIdx];
+    // Send unsubscribe: [0x81, portIdx]
+    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x81,portIdx]));
+  }else{
+    fftOpen[portIdx]=true;
+    // Send subscribe: [0x80, portIdx]
+    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x80,portIdx]));
+  }
+  buildPanels(); // rebuild to show/hide canvas
+}
+
+function drawAllFFT(){
+  const isDark=getTheme()==='dark';
+  for(const idx in fftOpen){
+    const i=parseInt(idx);
+    const canvas=$('fc'+i);
+    const data=fftData[i];
+    if(!canvas||!data)continue;
+    const ctx=canvas.getContext('2d');
+    const w=canvas.width,h=canvas.height;
+    ctx.clearRect(0,0,w,h);
+
+    const n=data.length;
+    const barW=w/n;
+    const minDb=-96,maxDb=0;
+
+    for(let b=0;b<n;b++){
+      const db=data[b];
+      const pct=Math.max(0,Math.min(1,(db-minDb)/(maxDb-minDb)));
+      const barH=pct*h;
+
+      // Color gradient: teal -> amber -> red
+      let r,g,bl;
+      if(pct<0.65){const t=pct/0.65;r=Math.round(0+t*245);g=Math.round(212-t*54);bl=Math.round(170-t*159)}
+      else if(pct<0.85){const t=(pct-0.65)/0.2;r=Math.round(245);g=Math.round(158-t*100);bl=Math.round(11-t*11)}
+      else{const t=(pct-0.85)/0.15;r=Math.round(229+t*26);g=Math.round(58-t*58);bl=Math.round(0)}
+
+      ctx.fillStyle='rgb('+r+','+g+','+bl+')';
+      ctx.fillRect(b*barW,h-barH,Math.max(barW-0.5,1),barH);
+    }
+
+    // Frequency labels
+    ctx.fillStyle=isDark?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.25)';
+    ctx.font='7px Inter,sans-serif';
+    const sr=S?.sampleRate||48000;
+    const labels=[100,1000,5000,10000,20000];
+    for(const freq of labels){
+      const bin=Math.round(freq/(sr/2)*n);
+      if(bin>0&&bin<n){
+        ctx.fillText(freq>=1000?(freq/1000)+'k':freq+'',bin*barW,h-1);
+      }
+    }
+  }
 }
 
 function isC(a,b){return S?.connections?.some(c=>c.source===a&&c.dest===b)}
@@ -202,28 +280,29 @@ function buildAll(){
   if(!S?.ports?.length){$('wrap').innerHTML='<div class="empty">Waiting for JACK...</div>';$('srcP').innerHTML='';$('dstP').innerHTML='';return}
   buildPanels();buildMatrix();
 }
+function portRow(p,i,reverse){
+  const cls=reverse?'pi pi-r':'pi';
+  let h='<div class="'+cls+'"><button class="eye'+(fftOpen[i]?' on':'')+'" onclick="toggleFFT('+i+')" title="Spectrum analyzer">\u{1F441}</button><span class="nm">'+esc(p.port)+'</span>'
+    +'<div class="vu"><div class="vu-rms" id="vr'+i+'"></div><div class="vu-peak" id="vp'+i+'"></div><div class="vu-hold" id="vh'+i+'"></div></div>'
+    +'<span class="db" id="db'+i+'">-\u221E</span>'
+    +'<span class="lat">'+p.latencyMs+'ms</span></div>';
+  if(fftOpen[i])h+='<div class="fft-wrap"><canvas class="fft-canvas" id="fc'+i+'" width="400" height="48"></canvas></div>';
+  return h;
+}
 function buildPanels(){
   const outs=S.ports.filter(p=>p.isOut),ins=S.ports.filter(p=>!p.isOut);
   let sh='<div class="ph">Sources</div><div class="presets">'+renderPre()+'</div>';
   let lc='';
   for(const p of outs){
     if(p.client!==lc){sh+='<div class="gl">'+esc(p.client)+'</div>';lc=p.client}
-    const i=S.ports.indexOf(p);
-    sh+='<div class="pi"><span class="nm">'+esc(p.port)+'</span>'
-      +'<div class="vu"><div class="vu-rms" id="vr'+i+'"></div><div class="vu-peak" id="vp'+i+'"></div><div class="vu-hold" id="vh'+i+'"></div></div>'
-      +'<span class="db" id="db'+i+'">-\u221E</span>'
-      +'<span class="lat">'+p.latencyMs+'ms</span></div>';
+    sh+=portRow(p,S.ports.indexOf(p),false);
   }
   $('srcP').innerHTML=sh;
   let dh='<div class="ph">Destinations</div>';
   lc='';
   for(const p of ins){
     if(p.client!==lc){dh+='<div class="gl">'+esc(p.client)+'</div>';lc=p.client}
-    const i=S.ports.indexOf(p);
-    dh+='<div class="pi pi-r"><span class="nm">'+esc(p.port)+'</span>'
-      +'<div class="vu"><div class="vu-rms" id="vr'+i+'"></div><div class="vu-peak" id="vp'+i+'"></div><div class="vu-hold" id="vh'+i+'"></div></div>'
-      +'<span class="db" id="db'+i+'">-\u221E</span>'
-      +'<span class="lat">'+p.latencyMs+'ms</span></div>';
+    dh+=portRow(p,S.ports.indexOf(p),true);
   }
   $('dstP').innerHTML=dh;
 }
