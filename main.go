@@ -310,6 +310,11 @@ static int jack_mon_ports_valid() {
     return 1;
 }
 
+static float meter_get_dsp_load() {
+    if (!g_meter.client) return 0.0f;
+    return jack_cpu_load(g_meter.client);
+}
+
 static jack_nframes_t meter_get_sample_rate() {
     if (!g_meter.client) return 48000;
     return jack_get_sample_rate(g_meter.client);
@@ -402,6 +407,7 @@ type State struct {
 	BufferSize  int          `json:"bufferSize"`
 	FFTBins     int          `json:"fftBins"`
 	Xruns       int          `json:"xruns"`
+	DSPLoad     float32      `json:"dspLoad"`
 }
 
 var (
@@ -431,7 +437,7 @@ func main() {
 	go statePollLoop(time.Duration(float64(time.Second) / *stateHz))
 	go meterLoop(time.Duration(float64(time.Second) / float64(*meterHz)))
 	go fftLoop(time.Duration(float64(time.Second) / float64(*fftHz)))
-	// monitorLoop removed — WebRTC handles audio streaming now
+	go historyLoop()
 
 	sub, _ := fs.Sub(staticFS, "static")
 	mux := http.NewServeMux()
@@ -444,6 +450,7 @@ func main() {
 	mux.HandleFunc("/api/monitor/start", apiMonitorStart)
 	mux.HandleFunc("/api/monitor/stop", apiMonitorStop)
 	mux.HandleFunc("/api/monitor/bitrate", apiMonitorBitrate)
+	mux.HandleFunc("/api/history", apiHistory)
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -616,6 +623,8 @@ func cMonStop()               { C.jack_mon_stop() }
 func cMonGetWritePos() int    { return int(C.jack_mon_get_write_pos()) }
 func cIsActive() bool         { return C.jack_is_active() != 0 }
 func cMonPortsValid() bool    { return C.jack_mon_ports_valid() != 0 }
+func cGetDSPLoad() float32    { return float32(C.meter_get_dsp_load()) }
+func cGetXruns() int           { return int(C.jack_get_xruns()) }
 
 func cMonRead(readPos int, outL, outR []float32, max int) int {
 	if max == 0 || len(outL) == 0 || len(outR) == 0 { return 0 }
@@ -665,6 +674,7 @@ func readState() *State {
 	st.SampleRate = int(C.meter_get_sample_rate())
 	st.BufferSize = int(C.meter_get_buffer_size())
 	st.Xruns = int(C.jack_get_xruns())
+	st.DSPLoad = float32(C.meter_get_dsp_load())
 	return st
 }
 
