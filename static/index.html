@@ -95,7 +95,7 @@ html[data-theme="light"] .vu{background:#d8dbe0}
 const $=id=>document.getElementById(id);
 
 // Theme
-function getTheme(){return localStorage.getItem('jack-patchbay-theme')||(window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark')}
+function getTheme(){return localStorage.getItem('jack-patchbay-theme')||'light'}
 function applyTheme(t){document.documentElement.setAttribute('data-theme',t);const b=$('themeBtn');if(b)b.textContent=t==='dark'?'\u2600':'\u263E'}
 function toggleTheme(){const t=getTheme()==='dark'?'light':'dark';localStorage.setItem('jack-patchbay-theme',t);applyTheme(t)}
 applyTheme(getTheme());
