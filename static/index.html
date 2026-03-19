@@ -135,7 +135,6 @@ function initSSE(){
   es.onmessage=e=>{try{
     S=JSON.parse(e.data);if(!S?.ports)S={ports:[],connections:[],clients:[]};if(!S.connections)S.connections=[];
     const nc=S.connections.length;stat(true,S.ports.length+' ports | '+nc+' conn');
-    const ji=$('ji');if(ji&&S.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+'f / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / rtt '+uiLatency+'ms';
     const nk=sk();if(nk!==skey){skey=nk;buildAll()}else updMatrix();
   }catch(x){console.error(x)}};
   es.onerror=()=>{stat(false,'Disconnected');es.close();sse=null;setTimeout(initSSE,3e3)};
@@ -186,7 +185,7 @@ function initWS(){
 function renderLoop(){
   if(meterDirty){meterDirty=false;updMeters()}
   // Update RTT display
-  const ji=$('ji');if(ji&&S?.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+'f / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / rtt '+uiLatency+'ms';
+  const ji=$('ji');if(ji&&S?.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+' samples / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / ui rtt '+uiLatency+'ms';
   requestAnimationFrame(renderLoop);
 }
 
