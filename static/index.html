@@ -184,10 +184,7 @@ function initWS(){
       const ch=view.getUint8(3);
       const floats=new Float32Array(samples*ch);
       for(let i=0;i<samples*ch;i++)floats[i]=view.getFloat32(4+i*4,true);
-      // Push interleaved stereo into ring buffer
-      monBuf.push(floats);
-      // Keep max ~500ms of buffer
-      while(monBuf.length>50)monBuf.shift();
+      if(monIngest)monIngest(floats);
       return;
     }
 
@@ -398,37 +395,51 @@ function toggleMon(portIdx){
 
 function startAudio(){
   if(audioCtx)return;
-  audioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:S?.sampleRate||48000});
-  // ScriptProcessorNode for maximum compatibility
-  monScriptNode=audioCtx.createScriptProcessor(2048,0,2);
+  const sr=S?.sampleRate||48000;
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
+
+  // Ring buffer: 1 second stereo
+  const RING=sr;
+  const ringL=new Float32Array(RING);
+  const ringR=new Float32Array(RING);
+  let ringW=0,ringR_=0,primed=false;
+  const PRE_BUFFER=Math.round(sr*0.15); // 150ms pre-buffer before playback starts
+
+  // Ingest WS chunks into ring
+  monIngest=function(floats){
+    const samples=floats.length/2;
+    for(let i=0;i<samples;i++){
+      ringL[ringW%RING]=floats[i*2];
+      ringR[ringW%RING]=floats[i*2+1];
+      ringW++;
+    }
+    if(!primed&&(ringW-ringR_)>=PRE_BUFFER)primed=true;
+  };
+
+  monScriptNode=audioCtx.createScriptProcessor(1024,0,2);
   monScriptNode.onaudioprocess=e=>{
     const outL=e.outputBuffer.getChannelData(0);
     const outR=e.outputBuffer.getChannelData(1);
-    let written=0;
-    while(written<outL.length&&monBuf.length>0){
-      const chunk=monBuf[0];
-      const chunkSamples=chunk.length/2;
-      const need=outL.length-written;
-      const take=Math.min(need,chunkSamples);
-      for(let i=0;i<take;i++){
-        outL[written+i]=chunk[i*2];
-        outR[written+i]=chunk[i*2+1];
-      }
-      written+=take;
-      if(take>=chunkSamples)monBuf.shift();
-      else{
-        // Partial consume: slice remaining
-        monBuf[0]=chunk.subarray(take*2);
-      }
+    if(!primed){for(let i=0;i<outL.length;i++){outL[i]=0;outR[i]=0}return}
+
+    const avail=ringW-ringR_;
+    // If buffer is getting too full (>500ms), skip ahead to prevent growing latency
+    if(avail>sr/2)ringR_=ringW-PRE_BUFFER;
+    // If buffer runs dry, output silence and re-prime
+    if(avail<outL.length){primed=false;for(let i=0;i<outL.length;i++){outL[i]=0;outR[i]=0}return}
+
+    for(let i=0;i<outL.length;i++){
+      outL[i]=ringL[ringR_%RING];
+      outR[i]=ringR[ringR_%RING];
+      ringR_++;
     }
-    // Fill remainder with silence
-    for(let i=written;i<outL.length;i++){outL[i]=0;outR[i]=0}
   };
   monScriptNode.connect(audioCtx.destination);
 }
+let monIngest=null;
 
 function stopAudio(){
-  monBuf.length=0;
+  monIngest=null;
   if(monScriptNode){monScriptNode.disconnect();monScriptNode=null}
   if(audioCtx){audioCtx.close();audioCtx=null}
 }
