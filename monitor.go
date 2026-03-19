@@ -117,7 +117,12 @@ func apiMonitorStart(w http.ResponseWriter, r *http.Request) {
 	monCancel = cancel
 	monMu.Unlock()
 
-	go streamAudioToWebRTC(track, cancel, ch1 >= 0)
+	go func() {
+		streamAudioToWebRTC(track, cancel, ch1 >= 0)
+		// Stream ended (port disappeared or cancelled) — clean up
+		log.Println("WebRTC monitor: stream ended, cleaning up")
+		stopMonitorInternal()
+	}()
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("WebRTC monitor: %s", state)
@@ -206,6 +211,12 @@ func streamAudioToWebRTC(track *webrtc.TrackLocalStaticSample, cancel chan struc
 
 		if !cIsActive() {
 			continue
+		}
+
+		// Check if monitored ports still exist (client disconnected?)
+		if !cMonPortsValid() {
+			log.Println("WebRTC monitor: monitored port disappeared, stopping")
+			return
 		}
 
 		// Calculate how much audio is available in the ring buffer

@@ -121,10 +121,13 @@ function toggleTheme(){const t=getTheme()==='dark'?'light':'dark';localStorage.s
 applyTheme(getTheme());
 
 let S=null,pending=new Set(),sse=null,ws=null,skey='',presets={},aPre='';
-const fftOpen={};
-const fftData={};
-const monPorts=new Set();
+const fftOpen={};  // port NAME -> true
+const fftData={};  // port INDEX -> Float32Array (updated per frame)
+const monPorts=new Set(); // port NAMES being monitored
 let monPC=null, monAudio=null;
+
+// Helper: get current index for a port name
+function portIdx(name){return S?.ports?.findIndex(p=>p.name===name)??-1}
 
 // Meter data (updated from WS, read by rAF)
 let meterDirty=false,fftDirty=false,uiLatency=0;
@@ -158,7 +161,7 @@ function initSSE(){
   es.onmessage=e=>{try{
     S=JSON.parse(e.data);if(!S?.ports)S={ports:[],connections:[],clients:[]};if(!S.connections)S.connections=[];
     const nc=S.connections.length;stat(true,S.ports.length+' ports | '+nc+' conn');
-    const nk=sk();if(nk!==skey){skey=nk;buildAll()}else updMatrix();
+    const nk=sk();if(nk!==skey){skey=nk;buildAll();resubFFT()}else updMatrix();
   }catch(x){console.error(x)}};
   es.onerror=()=>{stat(false,'Disconnected');es.close();sse=null;setTimeout(initSSE,3e3)};
   sse=es;
@@ -227,17 +230,24 @@ function renderLoop(){
 }
 
 // --- FFT / Spectrum Analyzer ---
-function toggleFFT(portIdx){
-  if(fftOpen[portIdx]){
-    delete fftOpen[portIdx];
-    // Send unsubscribe: [0x81, portIdx]
-    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x81,portIdx]));
+function toggleFFT(name){
+  const idx=portIdx(name);
+  if(fftOpen[name]){
+    delete fftOpen[name];
+    if(idx>=0&&ws&&ws.readyState===1)ws.send(new Uint8Array([0x81,idx]));
   }else{
-    fftOpen[portIdx]=true;
-    // Send subscribe: [0x80, portIdx]
-    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x80,portIdx]));
+    fftOpen[name]=true;
+    if(idx>=0&&ws&&ws.readyState===1)ws.send(new Uint8Array([0x80,idx]));
   }
-  buildPanels(); // rebuild to show/hide canvas
+  buildPanels();
+}
+// Re-subscribe FFTs after port list changes (indices may have shifted)
+function resubFFT(){
+  for(const name in fftOpen){
+    const idx=portIdx(name);
+    if(idx>=0&&ws&&ws.readyState===1)ws.send(new Uint8Array([0x80,idx]));
+    else delete fftOpen[name]; // port gone
+  }
 }
 
 function drawAllFFT(){
@@ -299,12 +309,12 @@ function buildAll(){
 }
 function portRow(p,i,reverse){
   const cls=reverse?'pi pi-r':'pi';
-  const monCls='mon'+(monPorts.has(i)?' on':'');
-  let h='<div class="'+cls+'"><button class="eye'+(fftOpen[i]?' on':'')+'" onclick="toggleFFT('+i+')" title="Spectrum">\u{1F441}</button><button class="'+monCls+'" onclick="toggleMon('+i+')" title="Monitor">\u{1F3A7}</button><span class="nm">'+esc(p.port)+'</span>'
+  const monCls='mon'+(monPorts.has(p.name)?' on':'');
+  let h='<div class="'+cls+'"><button class="eye'+(fftOpen[p.name]?' on':'')+'" onclick="toggleFFT(\''+ea(p.name)+'\')" title="Spectrum">\u{1F441}</button><button class="'+monCls+'" onclick="toggleMon(\''+ea(p.name)+'\')" title="Monitor">\u{1F3A7}</button><span class="nm">'+esc(p.port)+'</span>'
     +'<div class="vu"><div class="vu-rms" id="vr'+i+'"></div><div class="vu-peak" id="vp'+i+'"></div><div class="vu-hold" id="vh'+i+'"></div></div>'
     +'<span class="db" id="db'+i+'">-\u221E</span>'
     +'<span class="lat">'+p.latencyMs+'ms</span></div>';
-  if(fftOpen[i])h+='<div class="fft-wrap"><canvas class="fft-canvas" id="fc'+i+'" width="400" height="48"></canvas></div>';
+  if(fftOpen[p.name])h+='<div class="fft-wrap"><canvas class="fft-canvas" id="fc'+i+'" width="400" height="48"></canvas></div>';
   return h;
 }
 function buildPanels(){
@@ -372,18 +382,23 @@ function updMeters(){
 let monBitrate=64, monStatsInterval=null, monPrevBytes=0, monPrevTs=0;
 const monStats={rtt:0,jitter:0,loss:0,bitrate:0};
 
-function toggleMon(portIdx){
-  if(monPorts.has(portIdx)){
-    monPorts.delete(portIdx);
+function toggleMon(name){
+  if(monPorts.has(name)){
+    monPorts.delete(name);
   }else{
     if(monPorts.size>=2){
       const first=monPorts.values().next().value;
       monPorts.delete(first);
     }
-    monPorts.add(portIdx);
+    monPorts.add(name);
   }
   if(monPorts.size===0) stopMonitor();
-  else startMonitor([...monPorts]);
+  else{
+    // Resolve names to current indices for the server
+    const indices=[...monPorts].map(n=>portIdx(n)).filter(i=>i>=0);
+    if(indices.length>0)startMonitor(indices);
+    else{monPorts.clear();stopMonitor();}
+  }
   buildPanels();
 }
 
@@ -409,6 +424,15 @@ async function startMonitor(channels){
     if(!resp.ok){toast('Monitor failed','bad');return}
     const answer=await resp.json();
     await monPC.setRemoteDescription({type:'answer',sdp:answer.sdp});
+    // Detect server-side close (monitored port disappeared)
+    monPC.onconnectionstatechange=()=>{
+      const s=monPC?.connectionState;
+      if(s==='disconnected'||s==='failed'||s==='closed'){
+        console.log('Monitor: peer disconnected');
+        monPorts.clear();stopMonitor();buildPanels();
+        toast('Monitor stopped (port disconnected)');
+      }
+    };
     // Start stats polling
     monStatsInterval=setInterval(pollMonStats,1000);
     showMonWidget();
@@ -466,7 +490,7 @@ function showMonWidget(){
 function hideMonWidget(){const w=$('monWidget');if(w)w.remove()}
 function updMonWidget(){
   const w=$('monWidget');if(!w)return;
-  const ports=[...monPorts].map(i=>S?.ports?.[i]?.name||'?').join(' + ');
+  const ports=[...monPorts].join(' + ');
   w.innerHTML='<div class="mw-title"><span>\u{1F3A7} Monitor</span><span style="color:var(--teal)">'+esc(ports)+'</span></div>'
     +'<div class="mw-row"><span>RTT</span><span class="mw-val">'+monStats.rtt.toFixed(1)+' ms</span></div>'
     +'<div class="mw-row"><span>Jitter</span><span class="mw-val">'+monStats.jitter.toFixed(1)+' ms</span></div>'

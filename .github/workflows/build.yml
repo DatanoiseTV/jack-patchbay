@@ -27,35 +27,37 @@ jobs:
           go-version: "1.22"
 
       - name: Install cross-compilation toolchain
+        if: matrix.pkg_arch != 'amd64'
         run: |
           sudo dpkg --add-architecture ${{ matrix.pkg_arch }}
           # Remove non-standard sources that break multi-arch
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list || true
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list || true
-          # Add arch-specific sources
-          case "${{ matrix.pkg_arch }}" in
-            arm64)
-              echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs) main universe" | sudo tee /etc/apt/sources.list.d/arm64.list
-              echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-              ;;
-            armhf)
-              echo "deb [arch=armhf] http://ports.ubuntu.com/ $(lsb_release -cs) main universe" | sudo tee /etc/apt/sources.list.d/armhf.list
-              echo "deb [arch=armhf] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main universe" | sudo tee -a /etc/apt/sources.list.d/armhf.list
-              ;;
-          esac
+          # Handle both .list (older Ubuntu) and .sources (Noble+) formats
+          if ls /etc/apt/sources.list.d/*.list &>/dev/null; then
+            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list
+          fi
+          if ls /etc/apt/sources.list.d/*.sources &>/dev/null; then
+            sudo sed -i '/^Architectures:/d' /etc/apt/sources.list.d/*.sources
+            sudo sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/*.sources
+          fi
+          # Add arch-specific ports sources
+          CODENAME=$(lsb_release -cs)
+          cat <<EOF | sudo tee /etc/apt/sources.list.d/${{ matrix.pkg_arch }}-ports.list
+          deb [arch=${{ matrix.pkg_arch }}] http://ports.ubuntu.com/ ${CODENAME} main universe
+          deb [arch=${{ matrix.pkg_arch }}] http://ports.ubuntu.com/ ${CODENAME}-updates main universe
+          deb [arch=${{ matrix.pkg_arch }}] http://ports.ubuntu.com/ ${CODENAME}-security main universe
+          EOF
           sudo apt-get update -qq
-          sudo apt-get upgrade -y -qq
           case "${{ matrix.arch }}" in
-            amd64)
-              sudo apt-get install -y libjack-jackd2-dev
-              ;;
-            arm64)
-              sudo apt-get install -y gcc-aarch64-linux-gnu libjack-jackd2-dev:arm64
-              ;;
-            arm)
-              sudo apt-get install -y gcc-arm-linux-gnueabihf libjack-jackd2-dev:armhf
-              ;;
+            arm64) sudo apt-get install -y gcc-aarch64-linux-gnu libjack-jackd2-dev:arm64 ;;
+            arm)   sudo apt-get install -y gcc-arm-linux-gnueabihf libjack-jackd2-dev:armhf ;;
           esac
+
+      - name: Install native dependencies
+        if: matrix.pkg_arch == 'amd64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libjack-jackd2-dev
 
       - name: Build
         env:

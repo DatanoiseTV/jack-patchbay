@@ -298,6 +298,18 @@ static int jack_mon_read(int read_pos, float *out_l, float *out_r, int max_sampl
 
 static int jack_mon_get_write_pos() { return g_meter.mon_write; }
 
+// Check if monitored ports still exist in JACK
+static int jack_mon_ports_valid() {
+    if (!g_meter.mon_active || !g_meter.client) return 0;
+    for (int ch = 0; ch < 2; ch++) {
+        int idx = g_meter.mon_ch[ch];
+        if (idx < 0 || idx >= g_meter.port_count) continue;
+        jack_port_t *p = jack_port_by_name(g_meter.client, g_meter.port_names[idx]);
+        if (!p) return 0; // port disappeared
+    }
+    return 1;
+}
+
 static jack_nframes_t meter_get_sample_rate() {
     if (!g_meter.client) return 48000;
     return jack_get_sample_rate(g_meter.client);
@@ -603,6 +615,8 @@ func cMonStart(ch0, ch1 int)  { C.jack_mon_start(C.int(ch0), C.int(ch1)) }
 func cMonStop()               { C.jack_mon_stop() }
 func cMonGetWritePos() int    { return int(C.jack_mon_get_write_pos()) }
 func cIsActive() bool         { return C.jack_is_active() != 0 }
+func cMonPortsValid() bool    { return C.jack_mon_ports_valid() != 0 }
+
 func cMonRead(readPos int, outL, outR []float32, max int) int {
 	if max == 0 || len(outL) == 0 || len(outR) == 0 { return 0 }
 	n := int(C.jack_mon_read(C.int(readPos), (*C.float)(unsafe.Pointer(&outL[0])), (*C.float)(unsafe.Pointer(&outR[0])), C.int(max)))
