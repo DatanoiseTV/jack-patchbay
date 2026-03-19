@@ -222,7 +222,7 @@ function initWS(){
 function renderLoop(){
   if(meterDirty){meterDirty=false;updMeters()}
   if(fftDirty){fftDirty=false;drawAllFFT()}
-  const ji=$('ji');if(ji&&S?.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+' samples / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / ui rtt '+uiLatency+'ms'+(S.xruns>0?' / xruns: '+S.xruns:'');
+  const ji=$('ji');if(ji&&S?.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+' samples / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / ui rtt '+uiLatency+'ms / xruns: '+S.xruns;
   requestAnimationFrame(renderLoop);
 }
 
