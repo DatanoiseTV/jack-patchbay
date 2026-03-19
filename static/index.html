@@ -73,8 +73,10 @@ table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius
 .psel{background:var(--bg-deep);border:1px solid var(--border-strong);color:var(--text-primary);padding:2px 6px;border-radius:4px;font-size:10px;font-family:inherit;min-width:80px;cursor:pointer}
 
 /* Eye/FFT button */
-.eye{background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;opacity:0.4;transition:opacity .15s;color:var(--text-secondary)}
+.eye,.mon{background:none;border:none;cursor:pointer;font-size:11px;padding:0 2px;opacity:0.4;transition:opacity .15s;color:var(--text-secondary)}
 .eye:hover,.eye.on{opacity:1;color:var(--accent)}
+.mon:hover{opacity:1;color:var(--teal)}
+.mon.on{opacity:1;color:var(--teal);text-shadow:0 0 6px rgba(0,212,170,0.5)}
 .fft-wrap{padding:2px 12px 6px;overflow:hidden;transition:max-height .2s}
 .fft-canvas{width:100%;height:48px;border-radius:3px;background:var(--bg-deep);display:block}
 
@@ -108,8 +110,10 @@ function toggleTheme(){const t=getTheme()==='dark'?'light':'dark';localStorage.s
 applyTheme(getTheme());
 
 let S=null,pending=new Set(),sse=null,ws=null,skey='',presets={},aPre='';
-const fftOpen={};  // port index -> true if FFT panel is open
-const fftData={};  // port index -> Float32Array of dB values
+const fftOpen={};
+const fftData={};
+const monPorts=new Set(); // port indices being monitored (max 2)
+let audioCtx=null, monScriptNode=null, monBuf=[];
 
 // Meter data (updated from WS, read by rAF)
 let meterDirty=false,fftDirty=false,uiLatency=0;
@@ -171,6 +175,19 @@ function initWS(){
       let o=8;
       for(let i=0;i<binCount&&o+2<=view.byteLength;i++){fftData[portIdx][i]=view.getInt16(o,true)/100;o+=2}
       fftDirty=true;
+      return;
+    }
+
+    // Audio monitor data (type 0x03)
+    if(mtype===0x03&&view.byteLength>=4){
+      const samples=view.getUint16(1,true);
+      const ch=view.getUint8(3);
+      const floats=new Float32Array(samples*ch);
+      for(let i=0;i<samples*ch;i++)floats[i]=view.getFloat32(4+i*4,true);
+      // Push interleaved stereo into ring buffer
+      monBuf.push(floats);
+      // Keep max ~500ms of buffer
+      while(monBuf.length>50)monBuf.shift();
       return;
     }
 
@@ -282,7 +299,8 @@ function buildAll(){
 }
 function portRow(p,i,reverse){
   const cls=reverse?'pi pi-r':'pi';
-  let h='<div class="'+cls+'"><button class="eye'+(fftOpen[i]?' on':'')+'" onclick="toggleFFT('+i+')" title="Spectrum analyzer">\u{1F441}</button><span class="nm">'+esc(p.port)+'</span>'
+  const monCls='mon'+(monPorts.has(i)?' on':'');
+  let h='<div class="'+cls+'"><button class="eye'+(fftOpen[i]?' on':'')+'" onclick="toggleFFT('+i+')" title="Spectrum">\u{1F441}</button><button class="'+monCls+'" onclick="toggleMon('+i+')" title="Monitor">\u{1F3A7}</button><span class="nm">'+esc(p.port)+'</span>'
     +'<div class="vu"><div class="vu-rms" id="vr'+i+'"></div><div class="vu-peak" id="vp'+i+'"></div><div class="vu-hold" id="vh'+i+'"></div></div>'
     +'<span class="db" id="db'+i+'">-\u221E</span>'
     +'<span class="lat">'+p.latencyMs+'ms</span></div>';
@@ -348,6 +366,71 @@ function updMeters(){
     if(vh){if(hpct>1){vh.style.left=Math.min(hpct,99)+'%';vh.style.display=''}else vh.style.display='none'}
     if(db)db.textContent=dbStr(M.peak[i]);
   }
+}
+
+// --- Audio Monitor ---
+function toggleMon(portIdx){
+  if(monPorts.has(portIdx)){
+    monPorts.delete(portIdx);
+  }else{
+    if(monPorts.size>=2){
+      // Replace oldest
+      const first=monPorts.values().next().value;
+      monPorts.delete(first);
+    }
+    monPorts.add(portIdx);
+  }
+
+  if(monPorts.size===0){
+    // Stop monitoring
+    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x83]));
+    stopAudio();
+  }else{
+    // Start/update monitoring
+    const ports=[...monPorts];
+    const ch0=ports[0];
+    const ch1=ports.length>1?ports[1]:0xFF;
+    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x82,ch0,ch1]));
+    startAudio();
+  }
+  buildPanels();
+}
+
+function startAudio(){
+  if(audioCtx)return;
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:S?.sampleRate||48000});
+  // ScriptProcessorNode for maximum compatibility
+  monScriptNode=audioCtx.createScriptProcessor(2048,0,2);
+  monScriptNode.onaudioprocess=e=>{
+    const outL=e.outputBuffer.getChannelData(0);
+    const outR=e.outputBuffer.getChannelData(1);
+    let written=0;
+    while(written<outL.length&&monBuf.length>0){
+      const chunk=monBuf[0];
+      const chunkSamples=chunk.length/2;
+      const need=outL.length-written;
+      const take=Math.min(need,chunkSamples);
+      for(let i=0;i<take;i++){
+        outL[written+i]=chunk[i*2];
+        outR[written+i]=chunk[i*2+1];
+      }
+      written+=take;
+      if(take>=chunkSamples)monBuf.shift();
+      else{
+        // Partial consume: slice remaining
+        monBuf[0]=chunk.subarray(take*2);
+      }
+    }
+    // Fill remainder with silence
+    for(let i=written;i<outL.length;i++){outL[i]=0;outR[i]=0}
+  };
+  monScriptNode.connect(audioCtx.destination);
+}
+
+function stopAudio(){
+  monBuf.length=0;
+  if(monScriptNode){monScriptNode.disconnect();monScriptNode=null}
+  if(audioCtx){audioCtx.close();audioCtx=null}
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}

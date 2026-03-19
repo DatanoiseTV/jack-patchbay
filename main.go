@@ -66,11 +66,18 @@ typedef struct {
     int   active;
 
     // FFT ring buffers and results
-    float fft_ring[MAX_PORTS][FFT_SIZE];  // circular sample buffer per port
-    int   fft_pos[MAX_PORTS];              // write position in ring
-    float fft_mag[MAX_PORTS][FFT_BINS];    // last computed magnitude spectrum (dB)
-    int   fft_sub[MAX_PORTS];              // subscription flag (1=compute FFT)
-    int   fft_ready[MAX_PORTS];            // new FFT data available
+    float fft_ring[MAX_PORTS][FFT_SIZE];
+    int   fft_pos[MAX_PORTS];
+    float fft_mag[MAX_PORTS][FFT_BINS];
+    int   fft_sub[MAX_PORTS];
+    int   fft_ready[MAX_PORTS];
+
+    // Audio monitor: ring buffer for up to 2 channels
+    #define MON_RING_SIZE 16384
+    float mon_ring[2][MON_RING_SIZE];
+    int   mon_write;       // write position (both channels advance together)
+    int   mon_ch[2];       // port indices being monitored (-1 = none)
+    int   mon_active;      // 1 = monitoring enabled
 } meter_state_t;
 
 static meter_state_t g_meter;
@@ -132,6 +139,24 @@ static int process_callback(jack_nframes_t nframes, void *arg) {
             m->fft_ready[i] = 1;
         }
     }
+
+    // Audio monitor: copy subscribed port buffers to ring
+    if (m->mon_active) {
+        for (int ch = 0; ch < 2; ch++) {
+            int pidx = m->mon_ch[ch];
+            if (pidx < 0 || pidx >= m->port_count) continue;
+            jack_port_t *port = jack_port_by_name(m->client, m->port_names[pidx]);
+            if (!port) continue;
+            float *buf = (float *)jack_port_get_buffer(port, nframes);
+            if (!buf) continue;
+            int wp = m->mon_write;
+            for (jack_nframes_t j = 0; j < nframes; j++) {
+                m->mon_ring[ch][(wp + j) & (MON_RING_SIZE - 1)] = buf[j];
+            }
+        }
+        m->mon_write = (m->mon_write + nframes) & (MON_RING_SIZE - 1);
+    }
+
     return 0;
 }
 
@@ -144,6 +169,7 @@ static int jack_init() {
     if (g_meter.client) { jack_client_close(g_meter.client); g_meter.client = NULL; }
     g_meter.active = 0; g_meter.port_count = 0;
     memset(g_meter.fft_sub, 0, sizeof(g_meter.fft_sub));
+    g_meter.mon_active = 0; g_meter.mon_ch[0] = -1; g_meter.mon_ch[1] = -1; g_meter.mon_write = 0;
     jack_status_t status;
     g_meter.client = jack_client_open("patchbay-meter", JackNoStartServer, &status);
     if (!g_meter.client) return -1;
@@ -203,6 +229,38 @@ static int jack_read_fft(int port_idx, float *out, int max) {
 }
 
 static int jack_get_fft_bins() { return FFT_BINS; }
+
+// Audio monitor control
+static void jack_mon_start(int ch0, int ch1) {
+    g_meter.mon_ch[0] = ch0;
+    g_meter.mon_ch[1] = ch1;
+    g_meter.mon_write = 0;
+    g_meter.mon_active = 1;
+}
+
+static void jack_mon_stop() {
+    g_meter.mon_active = 0;
+    g_meter.mon_ch[0] = -1;
+    g_meter.mon_ch[1] = -1;
+}
+
+// Read monitor samples. Returns number of samples read per channel.
+// Caller provides read position, gets back new read position.
+static int jack_mon_read(int read_pos, float *out_l, float *out_r, int max_samples) {
+    if (!g_meter.mon_active) return 0;
+    int wp = g_meter.mon_write;
+    int avail = (wp - read_pos) & (MON_RING_SIZE - 1);
+    if (avail > max_samples) avail = max_samples;
+    if (avail <= 0) return 0;
+    for (int i = 0; i < avail; i++) {
+        int pos = (read_pos + i) & (MON_RING_SIZE - 1);
+        out_l[i] = (g_meter.mon_ch[0] >= 0) ? g_meter.mon_ring[0][pos] : 0.0f;
+        out_r[i] = (g_meter.mon_ch[1] >= 0) ? g_meter.mon_ring[1][pos] : 0.0f;
+    }
+    return avail;
+}
+
+static int jack_mon_get_write_pos() { return g_meter.mon_write; }
 
 static jack_nframes_t meter_get_sample_rate() {
     if (!g_meter.client) return 48000;
@@ -304,9 +362,11 @@ var (
 )
 
 type wsClient struct {
-	conn    net.Conn
-	fftSubs map[int]bool // port indices this client wants FFT for
-	mu      sync.Mutex
+	conn      net.Conn
+	fftSubs   map[int]bool
+	monActive bool
+	monReadPos int
+	mu        sync.Mutex
 }
 
 func main() {
@@ -321,6 +381,7 @@ func main() {
 	go statePollLoop(time.Duration(float64(time.Second) / *stateHz))
 	go meterLoop(time.Duration(float64(time.Second) / float64(*meterHz)))
 	go fftLoop(time.Duration(float64(time.Second) / float64(*fftHz)))
+	go monitorLoop()
 
 	sub, _ := fs.Sub(staticFS, "static")
 	mux := http.NewServeMux()
@@ -479,6 +540,67 @@ func fftLoop(interval time.Duration) {
 			}
 			wsMu.Unlock()
 		}
+	}
+}
+
+// monitorLoop: reads audio from C ring buffer, sends as WS binary (type 0x03)
+// Runs at ~100Hz (every 10ms), sends 480 samples per chunk at 48kHz
+func monitorLoop() {
+	var outL, outR [4096]C.float
+	for {
+		time.Sleep(10 * time.Millisecond)
+		if C.jack_is_active() == 0 {
+			continue
+		}
+
+		wsMu.Lock()
+		var activeClient *wsClient
+		for c := range wsConns {
+			c.mu.Lock()
+			if c.monActive {
+				activeClient = c
+			}
+			c.mu.Unlock()
+			if activeClient != nil {
+				break
+			}
+		}
+		wsMu.Unlock()
+
+		if activeClient == nil {
+			continue
+		}
+
+		activeClient.mu.Lock()
+		readPos := activeClient.monReadPos
+		n := int(C.jack_mon_read(C.int(readPos), &outL[0], &outR[0], 4096))
+		if n > 0 {
+			activeClient.monReadPos = (readPos + n) & (16384 - 1) // MON_RING_SIZE
+		}
+		activeClient.mu.Unlock()
+
+		if n == 0 {
+			continue
+		}
+
+		// Pack: [0x03] [samples:u16le] [channels:u8] [interleaved float32le data]
+		ch := 2
+		frameSize := 4 + n*ch*4
+		buf := make([]byte, frameSize)
+		buf[0] = 0x03
+		binary.LittleEndian.PutUint16(buf[1:], uint16(n))
+		buf[3] = byte(ch)
+		off := 4
+		for i := 0; i < n; i++ {
+			binary.LittleEndian.PutUint32(buf[off:], math.Float32bits(float32(outL[i])))
+			off += 4
+			binary.LittleEndian.PutUint32(buf[off:], math.Float32bits(float32(outR[i])))
+			off += 4
+		}
+
+		frame := wsFrameEncode(buf)
+		activeClient.conn.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+		activeClient.conn.Write(frame)
 	}
 }
 
@@ -661,6 +783,23 @@ func apiMetersWS(w http.ResponseWriter, r *http.Request) {
 					wsMu.Unlock()
 					if !stillNeeded { C.jack_fft_subscribe(C.int(portIdx), 0) }
 				}
+				client.mu.Unlock()
+			}
+			// 0x82 = start monitor [ch0:u8, ch1:u8], 0x83 = stop monitor
+			if len(payload) >= 1 && payload[0] == 0x82 && len(payload) >= 3 {
+				ch0 := int(payload[1])
+				ch1 := int(payload[2])
+				if ch1 == 0xFF { ch1 = -1 }
+				C.jack_mon_start(C.int(ch0), C.int(ch1))
+				client.mu.Lock()
+				client.monActive = true
+				client.monReadPos = int(C.jack_mon_get_write_pos())
+				client.mu.Unlock()
+			}
+			if len(payload) >= 1 && payload[0] == 0x83 {
+				C.jack_mon_stop()
+				client.mu.Lock()
+				client.monActive = false
 				client.mu.Unlock()
 			}
 		}
