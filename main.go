@@ -238,6 +238,7 @@ func main() {
 	mux.HandleFunc("/api/disconnect", apiDisconnect)
 	mux.HandleFunc("/api/events", apiSSE)
 	mux.HandleFunc("/api/meters", apiMetersWS)
+	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 	log.Fatal(http.ListenAndServe(*addr, mux))
 }

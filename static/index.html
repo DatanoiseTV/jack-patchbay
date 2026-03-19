@@ -103,7 +103,7 @@ applyTheme(getTheme());
 let S=null,pending=new Set(),sse=null,ws=null,skey='',presets={},aPre='';
 
 // Meter data (updated from WS, read by rAF)
-let meterDirty=false,wsLatency=0,wsLatAvg=[];
+let meterDirty=false,uiLatency=0;
 const M={peak:null,rms:null,hold:null,holdDecay:null,ts:0};
 
 const toast=(m,t='ok')=>{const e=$('toast');e.textContent=m;e.className='toast show '+t;setTimeout(()=>e.className='toast',2e3)};
@@ -129,7 +129,7 @@ function initSSE(){
   es.onmessage=e=>{try{
     S=JSON.parse(e.data);if(!S?.ports)S={ports:[],connections:[],clients:[]};if(!S.connections)S.connections=[];
     const nc=S.connections.length;stat(true,S.ports.length+' ports | '+nc+' conn');
-    const ji=$('ji');if(ji&&S.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+'f / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / ui '+wsLatency+'ms';
+    const ji=$('ji');if(ji&&S.sampleRate)ji.textContent=(S.sampleRate/1000)+'kHz / '+S.bufferSize+'f / '+(S.bufferSize/S.sampleRate*1000).toFixed(1)+'ms / rtt '+uiLatency+'ms';
     const nk=sk();if(nk!==skey){skey=nk;buildAll()}else updMatrix();
   }catch(x){console.error(x)}};
   es.onerror=()=>{stat(false,'Disconnected');es.close();sse=null;setTimeout(initSSE,3e3)};
@@ -152,11 +152,6 @@ function initWS(){
     if(type!==0x01)return;
     const n=view.getUint8(1);
     M.ts=view.getUint32(2,true);
-
-    // UI-to-backend latency (one-way estimate from server timestamp)
-    const now=Date.now()&0xFFFFFFFF;
-    const lat=now-M.ts;
-    if(lat>=0&&lat<2000){wsLatAvg.push(lat);if(wsLatAvg.length>30)wsLatAvg.shift();wsLatency=Math.round(wsLatAvg.reduce((a,b)=>a+b,0)/wsLatAvg.length)}
 
     if(!M.peak||M.peak.length!==n){
       M.peak=new Float32Array(n);M.rms=new Float32Array(n);
@@ -273,7 +268,19 @@ function esc(s){const d=document.createElement('div');d.textContent=s;return d.i
 function ea(s){return s.replace(/'/g,"\\'")}
 function css(s){return s.replace(/[^a-zA-Z0-9_-]/g,'_')}
 
-initSSE();initWS();requestAnimationFrame(renderLoop);
+// Ping RTT measurement (every 2s, rolling average of 5)
+const pingAvg=[];
+async function pingLoop(){
+  try{
+    const t0=performance.now();
+    await fetch('/api/ping');
+    const rtt=Math.round(performance.now()-t0);
+    pingAvg.push(rtt);if(pingAvg.length>5)pingAvg.shift();
+    uiLatency=Math.round(pingAvg.reduce((a,b)=>a+b,0)/pingAvg.length);
+  }catch(e){}
+  setTimeout(pingLoop,2000);
+}
+initSSE();initWS();requestAnimationFrame(renderLoop);pingLoop();
 </script>
 </body>
 </html>
