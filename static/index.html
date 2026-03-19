@@ -274,9 +274,9 @@ async function pingLoop(){
   try{
     const t0=performance.now();
     await fetch('/api/ping');
-    const rtt=Math.round(performance.now()-t0);
+    const rtt=performance.now()-t0;
     pingAvg.push(rtt);if(pingAvg.length>5)pingAvg.shift();
-    uiLatency=Math.round(pingAvg.reduce((a,b)=>a+b,0)/pingAvg.length);
+    uiLatency=(pingAvg.reduce((a,b)=>a+b,0)/pingAvg.length).toFixed(1);
   }catch(e){}
   setTimeout(pingLoop,2000);
 }
