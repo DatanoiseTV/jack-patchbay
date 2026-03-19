@@ -4,7 +4,7 @@ A web-based audio patchbay for [JACK Audio Connection Kit](https://jackaudio.org
 
 ![Matrix patchbay with VU meters, connection routing, and preset management](https://img.shields.io/badge/status-alpha-blue)
 
-<img width="2308" height="1470" alt="image" src="https://github.com/user-attachments/assets/f1b70833-e73f-4fae-8825-58bdc144690a" />
+<img width="2400" height="1492" alt="image" src="https://github.com/user-attachments/assets/1b29f993-3f3d-452b-9122-cedccb32ad75" />
 
 ## Features
 
