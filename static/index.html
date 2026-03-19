@@ -77,6 +77,17 @@ table td.pend::after{content:'';display:block;width:8px;height:8px;border-radius
 .eye:hover,.eye.on{opacity:1;color:var(--accent)}
 .mon:hover{opacity:1;color:var(--teal)}
 .mon.on{opacity:1;color:var(--teal);text-shadow:0 0 6px rgba(0,212,170,0.5)}
+
+/* Monitor widget */
+.mon-widget{position:fixed;bottom:12px;right:12px;background:var(--bg-base);border:1px solid var(--border-strong);border-radius:8px;padding:10px 14px;font-size:10px;z-index:50;min-width:200px;box-shadow:0 4px 20px rgba(0,0,0,0.4)}
+.mon-widget .mw-title{font-weight:600;color:var(--text-primary);font-size:11px;margin-bottom:6px;display:flex;align-items:center;justify-content:space-between}
+.mon-widget .mw-row{display:flex;justify-content:space-between;padding:1px 0;color:var(--text-secondary)}
+.mon-widget .mw-val{font-family:'JetBrains Mono',monospace;color:var(--text-primary)}
+.mon-widget .mw-btns{display:flex;gap:4px;margin-top:6px}
+.mon-widget .mw-btn{font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;border:1px solid var(--border);background:var(--bg-raised);color:var(--text-secondary);font-family:inherit}
+.mon-widget .mw-btn:hover{border-color:var(--accent);color:var(--accent)}
+.mon-widget .mw-btn.sel{background:var(--accent);color:#fff;border-color:var(--accent)}
+.mon-widget .mw-stop{background:var(--danger);color:#fff;border-color:var(--danger);margin-left:auto}
 .fft-wrap{padding:2px 12px 6px;overflow:hidden;transition:max-height .2s}
 .fft-canvas{width:100%;height:48px;border-radius:3px;background:var(--bg-deep);display:block}
 
@@ -112,8 +123,8 @@ applyTheme(getTheme());
 let S=null,pending=new Set(),sse=null,ws=null,skey='',presets={},aPre='';
 const fftOpen={};
 const fftData={};
-const monPorts=new Set(); // port indices being monitored (max 2)
-let audioCtx=null, monScriptNode=null, monBuf=[];
+const monPorts=new Set();
+let monPC=null, monAudio=null;
 
 // Meter data (updated from WS, read by rAF)
 let meterDirty=false,fftDirty=false,uiLatency=0;
@@ -178,15 +189,7 @@ function initWS(){
       return;
     }
 
-    // Audio monitor data (type 0x03)
-    if(mtype===0x03&&view.byteLength>=4){
-      const samples=view.getUint16(1,true);
-      const ch=view.getUint8(3);
-      const floats=new Float32Array(samples*ch);
-      for(let i=0;i<samples*ch;i++)floats[i]=view.getFloat32(4+i*4,true);
-      if(monIngest)monIngest(floats);
-      return;
-    }
+    // Audio monitor now via WebRTC, not WS
 
     if(mtype!==0x01)return;
     const n=view.getUint8(1);
@@ -365,83 +368,115 @@ function updMeters(){
   }
 }
 
-// --- Audio Monitor ---
+// --- Audio Monitor (WebRTC + Opus) ---
+let monBitrate=64, monStatsInterval=null, monPrevBytes=0, monPrevTs=0;
+const monStats={rtt:0,jitter:0,loss:0,bitrate:0};
+
 function toggleMon(portIdx){
   if(monPorts.has(portIdx)){
     monPorts.delete(portIdx);
   }else{
     if(monPorts.size>=2){
-      // Replace oldest
       const first=monPorts.values().next().value;
       monPorts.delete(first);
     }
     monPorts.add(portIdx);
   }
-
-  if(monPorts.size===0){
-    // Stop monitoring
-    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x83]));
-    stopAudio();
-  }else{
-    // Start/update monitoring
-    const ports=[...monPorts];
-    const ch0=ports[0];
-    const ch1=ports.length>1?ports[1]:0xFF;
-    if(ws&&ws.readyState===1)ws.send(new Uint8Array([0x82,ch0,ch1]));
-    startAudio();
-  }
+  if(monPorts.size===0) stopMonitor();
+  else startMonitor([...monPorts]);
   buildPanels();
 }
 
-function startAudio(){
-  if(audioCtx)return;
-  const sr=S?.sampleRate||48000;
-  audioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:sr});
-
-  // Ring buffer: 1 second stereo
-  const RING=sr;
-  const ringL=new Float32Array(RING);
-  const ringR=new Float32Array(RING);
-  let ringW=0,ringR_=0,primed=false;
-  const PRE_BUFFER=Math.round(sr*0.15); // 150ms pre-buffer before playback starts
-
-  // Ingest WS chunks into ring
-  monIngest=function(floats){
-    const samples=floats.length/2;
-    for(let i=0;i<samples;i++){
-      ringL[ringW%RING]=floats[i*2];
-      ringR[ringW%RING]=floats[i*2+1];
-      ringW++;
-    }
-    if(!primed&&(ringW-ringR_)>=PRE_BUFFER)primed=true;
-  };
-
-  monScriptNode=audioCtx.createScriptProcessor(1024,0,2);
-  monScriptNode.onaudioprocess=e=>{
-    const outL=e.outputBuffer.getChannelData(0);
-    const outR=e.outputBuffer.getChannelData(1);
-    if(!primed){for(let i=0;i<outL.length;i++){outL[i]=0;outR[i]=0}return}
-
-    const avail=ringW-ringR_;
-    // If buffer is getting too full (>500ms), skip ahead to prevent growing latency
-    if(avail>sr/2)ringR_=ringW-PRE_BUFFER;
-    // If buffer runs dry, output silence and re-prime
-    if(avail<outL.length){primed=false;for(let i=0;i<outL.length;i++){outL[i]=0;outR[i]=0}return}
-
-    for(let i=0;i<outL.length;i++){
-      outL[i]=ringL[ringR_%RING];
-      outR[i]=ringR[ringR_%RING];
-      ringR_++;
-    }
-  };
-  monScriptNode.connect(audioCtx.destination);
+async function startMonitor(channels){
+  await stopMonitor();
+  try{
+    monPC=new RTCPeerConnection({iceServers:[]});
+    monPC.ontrack=e=>{
+      if(!monAudio){monAudio=new Audio();monAudio.autoplay=true}
+      monAudio.srcObject=e.streams[0];
+    };
+    monPC.addTransceiver('audio',{direction:'recvonly'});
+    const offer=await monPC.createOffer();
+    await monPC.setLocalDescription(offer);
+    await new Promise(r=>{
+      if(monPC.iceGatheringState==='complete')r();
+      else{monPC.onicegatheringstatechange=()=>{if(monPC.iceGatheringState==='complete')r()};setTimeout(r,3000)}
+    });
+    const resp=await fetch('/api/monitor/start',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sdp:monPC.localDescription.sdp,channels,bitrate:monBitrate})
+    });
+    if(!resp.ok){toast('Monitor failed','bad');return}
+    const answer=await resp.json();
+    await monPC.setRemoteDescription({type:'answer',sdp:answer.sdp});
+    // Start stats polling
+    monStatsInterval=setInterval(pollMonStats,1000);
+    showMonWidget();
+    toast('Monitoring '+(channels.length>1?'stereo':'mono'));
+  }catch(e){
+    console.error('WebRTC:',e);toast(e.message,'bad');stopMonitor();
+  }
 }
-let monIngest=null;
 
-function stopAudio(){
-  monIngest=null;
-  if(monScriptNode){monScriptNode.disconnect();monScriptNode=null}
-  if(audioCtx){audioCtx.close();audioCtx=null}
+async function stopMonitor(){
+  if(monStatsInterval){clearInterval(monStatsInterval);monStatsInterval=null}
+  if(monAudio){monAudio.srcObject=null;monAudio=null}
+  if(monPC){monPC.close();monPC=null}
+  hideMonWidget();
+  try{await fetch('/api/monitor/stop',{method:'POST'})}catch(e){}
+}
+
+async function pollMonStats(){
+  if(!monPC)return;
+  try{
+    const stats=await monPC.getStats();
+    stats.forEach(s=>{
+      if(s.type==='inbound-rtp'&&s.kind==='audio'){
+        monStats.jitter=(s.jitter||0)*1000;
+        monStats.loss=s.packetsLost||0;
+        if(monPrevTs>0){
+          const dt=(s.timestamp-monPrevTs)/1000;
+          if(dt>0)monStats.bitrate=Math.round((s.bytesReceived-monPrevBytes)*8/dt/1000);
+        }
+        monPrevBytes=s.bytesReceived;monPrevTs=s.timestamp;
+      }
+      if(s.type==='candidate-pair'&&s.state==='succeeded'){
+        monStats.rtt=(s.currentRoundTripTime||0)*1000;
+      }
+    });
+    updMonWidget();
+  }catch(e){}
+}
+
+async function setMonBitrate(kbps){
+  monBitrate=kbps;
+  await fetch('/api/monitor/bitrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bitrate:kbps})});
+  // Restart to apply new bitrate
+  if(monPorts.size>0)startMonitor([...monPorts]);
+}
+
+function showMonWidget(){
+  let w=$('monWidget');
+  if(!w){
+    w=document.createElement('div');w.id='monWidget';w.className='mon-widget';
+    document.body.appendChild(w);
+  }
+  updMonWidget();
+}
+function hideMonWidget(){const w=$('monWidget');if(w)w.remove()}
+function updMonWidget(){
+  const w=$('monWidget');if(!w)return;
+  const ports=[...monPorts].map(i=>S?.ports?.[i]?.name||'?').join(' + ');
+  w.innerHTML='<div class="mw-title"><span>\u{1F3A7} Monitor</span><span style="color:var(--teal)">'+esc(ports)+'</span></div>'
+    +'<div class="mw-row"><span>RTT</span><span class="mw-val">'+monStats.rtt.toFixed(1)+' ms</span></div>'
+    +'<div class="mw-row"><span>Jitter</span><span class="mw-val">'+monStats.jitter.toFixed(1)+' ms</span></div>'
+    +'<div class="mw-row"><span>Packet loss</span><span class="mw-val">'+monStats.loss+'</span></div>'
+    +'<div class="mw-row"><span>Bitrate</span><span class="mw-val">'+(monStats.bitrate||monBitrate)+' kbps</span></div>'
+    +'<div class="mw-btns">'
+    +'<button class="mw-btn'+(monBitrate===32?' sel':'')+'" onclick="setMonBitrate(32)">32k</button>'
+    +'<button class="mw-btn'+(monBitrate===64?' sel':'')+'" onclick="setMonBitrate(64)">64k</button>'
+    +'<button class="mw-btn mw-stop" onclick="monPorts.clear();stopMonitor();buildPanels()">Stop</button>'
+    +'</div>';
 }
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}

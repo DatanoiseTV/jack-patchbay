@@ -362,11 +362,9 @@ var (
 )
 
 type wsClient struct {
-	conn      net.Conn
-	fftSubs   map[int]bool
-	monActive bool
-	monReadPos int
-	mu        sync.Mutex
+	conn    net.Conn
+	fftSubs map[int]bool
+	mu      sync.Mutex
 }
 
 func main() {
@@ -381,7 +379,7 @@ func main() {
 	go statePollLoop(time.Duration(float64(time.Second) / *stateHz))
 	go meterLoop(time.Duration(float64(time.Second) / float64(*meterHz)))
 	go fftLoop(time.Duration(float64(time.Second) / float64(*fftHz)))
-	go monitorLoop()
+	// monitorLoop removed — WebRTC handles audio streaming now
 
 	sub, _ := fs.Sub(staticFS, "static")
 	mux := http.NewServeMux()
@@ -391,6 +389,9 @@ func main() {
 	mux.HandleFunc("/api/events", apiSSE)
 	mux.HandleFunc("/api/meters", apiMetersWS)
 	mux.HandleFunc("/api/ping", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/api/monitor/start", apiMonitorStart)
+	mux.HandleFunc("/api/monitor/stop", apiMonitorStop)
+	mux.HandleFunc("/api/monitor/bitrate", apiMonitorBitrate)
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -543,65 +544,16 @@ func fftLoop(interval time.Duration) {
 	}
 }
 
-// monitorLoop: reads audio from C ring buffer, sends as WS binary (type 0x03)
-// Runs at ~100Hz (every 10ms), sends 480 samples per chunk at 48kHz
-func monitorLoop() {
-	var outL, outR [4096]C.float
-	for {
-		time.Sleep(10 * time.Millisecond)
-		if C.jack_is_active() == 0 {
-			continue
-		}
 
-		wsMu.Lock()
-		var activeClient *wsClient
-		for c := range wsConns {
-			c.mu.Lock()
-			if c.monActive {
-				activeClient = c
-			}
-			c.mu.Unlock()
-			if activeClient != nil {
-				break
-			}
-		}
-		wsMu.Unlock()
-
-		if activeClient == nil {
-			continue
-		}
-
-		activeClient.mu.Lock()
-		readPos := activeClient.monReadPos
-		n := int(C.jack_mon_read(C.int(readPos), &outL[0], &outR[0], 4096))
-		if n > 0 {
-			activeClient.monReadPos = (readPos + n) & (16384 - 1) // MON_RING_SIZE
-		}
-		activeClient.mu.Unlock()
-
-		if n == 0 {
-			continue
-		}
-
-		// Pack: [0x03] [samples:u16le] [channels:u8] [interleaved float32le data]
-		ch := 2
-		frameSize := 4 + n*ch*4
-		buf := make([]byte, frameSize)
-		buf[0] = 0x03
-		binary.LittleEndian.PutUint16(buf[1:], uint16(n))
-		buf[3] = byte(ch)
-		off := 4
-		for i := 0; i < n; i++ {
-			binary.LittleEndian.PutUint32(buf[off:], math.Float32bits(float32(outL[i])))
-			off += 4
-			binary.LittleEndian.PutUint32(buf[off:], math.Float32bits(float32(outR[i])))
-			off += 4
-		}
-
-		frame := wsFrameEncode(buf)
-		activeClient.conn.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
-		activeClient.conn.Write(frame)
-	}
+// Go wrappers for C monitor functions (callable from monitor.go)
+func cMonStart(ch0, ch1 int)  { C.jack_mon_start(C.int(ch0), C.int(ch1)) }
+func cMonStop()               { C.jack_mon_stop() }
+func cMonGetWritePos() int    { return int(C.jack_mon_get_write_pos()) }
+func cIsActive() bool         { return C.jack_is_active() != 0 }
+func cMonRead(readPos int, outL, outR []float32, max int) int {
+	if max == 0 || len(outL) == 0 || len(outR) == 0 { return 0 }
+	n := int(C.jack_mon_read(C.int(readPos), (*C.float)(unsafe.Pointer(&outL[0])), (*C.float)(unsafe.Pointer(&outR[0])), C.int(max)))
+	return n
 }
 
 func readState() *State {
@@ -785,23 +737,7 @@ func apiMetersWS(w http.ResponseWriter, r *http.Request) {
 				}
 				client.mu.Unlock()
 			}
-			// 0x82 = start monitor [ch0:u8, ch1:u8], 0x83 = stop monitor
-			if len(payload) >= 1 && payload[0] == 0x82 && len(payload) >= 3 {
-				ch0 := int(payload[1])
-				ch1 := int(payload[2])
-				if ch1 == 0xFF { ch1 = -1 }
-				C.jack_mon_start(C.int(ch0), C.int(ch1))
-				client.mu.Lock()
-				client.monActive = true
-				client.monReadPos = int(C.jack_mon_get_write_pos())
-				client.mu.Unlock()
-			}
-			if len(payload) >= 1 && payload[0] == 0x83 {
-				C.jack_mon_stop()
-				client.mu.Lock()
-				client.monActive = false
-				client.mu.Unlock()
-			}
+			// Monitor now handled via WebRTC (see monitor.go)
 		}
 		// Cleanup: unsubscribe all FFTs for this client
 		client.mu.Lock()
