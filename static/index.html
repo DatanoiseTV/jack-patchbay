@@ -252,8 +252,9 @@ function resubFFT(){
 
 function drawAllFFT(){
   const isDark=getTheme()==='dark';
-  for(const idx in fftOpen){
-    const i=parseInt(idx);
+  for(const name in fftOpen){
+    const i=portIdx(name);
+    if(i<0)continue;
     const canvas=$('fc'+i);
     const data=fftData[i];
     if(!canvas||!data)continue;
